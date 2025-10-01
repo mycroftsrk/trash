@@ -173,11 +173,13 @@ for idx, row in df_w_lsc.iterrows():
     ar_test_ex_noise[idx] = {"test_w_l":l, "test_w_s":s, "test_w_c":c}
 
 df_test_w_lsc =  pd.DataFrame.from_dict(ar_test_ex_noise, orient='index')
-df_test_w_lsc = df_test_w_lsc.iloc[:-1, :]  # 実データのLSC（正解）との比較diffのため、余分な最終行を除外
+# 実データのLSC（正解）との比較diffのため、余分な最終行を除外（インプットデータには存在しないT+1の予測値）
+df_test_w_lsc = df_test_w_lsc.iloc[:-1, :]
 df_test_w_lsc = df_test_w_lsc.reset_index()
+# ★★ t+1予測のindex に tの日付が入っている
 
 # shift
-# 実データのLSC（正解）との比較diffのため、t+1以降の値を抽出
+# 実データのLSC（正解）との比較diffのため、1行目以降の値を抽出
 df_shift_one = df_w_lsc.copy().iloc[1:, :]
 df_shift_one = df_shift_one.reset_index()
 df_shift_one = df_shift_one[["w_L", "w_S", "w_C"]]
@@ -219,6 +221,7 @@ print(ar_L_w)
 print(ar_S_w)
 print(ar_C_w)
 print('------------------')
+# model.summary() の S.D. of innovations の値と同じになるはず
 print('--------sigma------')
 print(sigma_L)
 print(sigma_S)
@@ -232,6 +235,8 @@ print('-------------コレスキー分解-----------')
 print(chol)
 print('-------------------------------------')
 
+# %%
+ar_C_fitted_model.summary()
 
 # %%
 # lambda探索
@@ -279,3 +284,86 @@ for lmd in lmd_list:
 
 pd.DataFrame.from_dict(res_mean_squares, orient='index').to_csv("test_lmd_search_jgb_2years.csv")
 pd.DataFrame.from_dict(res_mean_squares, orient='index')
+
+
+# %%
+# グリッドごとの標準偏差  
+#
+# パラメータ推定
+df_input = get_input_data_jgb()
+tenor_list= np.array([int(col[:-1]) for col in df_input.columns.values])
+df_input.columns = tenor_list
+
+lmd = 0.206 
+
+df_w_lsc = get_df_w_lsc(df_input, lmd, tenor_list)
+df_w_lsc.to_pickle("pddf_w_lsc_with_" + str(lmd) + ".pkl")
+
+ar_L_fitted_model = get_armodel_fitted_by_statsmodels(df_w_lsc, "w_L", 1)
+ar_S_fitted_model = get_armodel_fitted_by_statsmodels(df_w_lsc, "w_S", 1)
+ar_C_fitted_model = get_armodel_fitted_by_statsmodels(df_w_lsc, "w_C", 1)
+
+res_summary_ar_L_model = results_summary_by_sm_to_dataframe(ar_L_fitted_model)
+res_summary_ar_S_model = results_summary_by_sm_to_dataframe(ar_S_fitted_model)
+res_summary_ar_C_model = results_summary_by_sm_to_dataframe(ar_C_fitted_model)
+ar_L_fitted_model.summary()
+ar_S_fitted_model.summary()
+ar_C_fitted_model.summary()
+
+# 定数項と係数
+ar_L_const = res_summary_ar_L_model['coeff'].iloc[0]
+ar_S_const = res_summary_ar_S_model['coeff'].iloc[0]
+ar_C_const = res_summary_ar_C_model['coeff'].iloc[0]
+ar_L_w = res_summary_ar_L_model['coeff'].iloc[1]
+ar_S_w = res_summary_ar_S_model['coeff'].iloc[1]
+ar_C_w = res_summary_ar_C_model['coeff'].iloc[1]
+
+# 乱数生成時に使用するsigmaを算出
+
+# ノイズ項を含めず、定数項と係数でLSCを計算
+ar_test_ex_noise = {}
+for idx, row in df_w_lsc.iterrows():
+    l = ar_L_const + ar_L_w * row["w_L"]    # t+1 の Lを計算
+    s = ar_S_const + ar_S_w * row["w_S"]    # t+1 の Sを計算
+    c = ar_C_const + ar_C_w * row["w_C"]    # t+1 の Cを計算
+    ar_test_ex_noise[idx] = {"test_w_l":l, "test_w_s":s, "test_w_c":c}
+
+df_testpred_w_lsc =  pd.DataFrame.from_dict(ar_test_ex_noise, orient='index')
+df_testpred_w_lsc_shift = df_testpred_w_lsc[:-1].copy()
+df_testpred_w_lsc_shift.index = df_testpred_w_lsc.index[1:]
+df_testpred_w_lsc_shift
+
+# 比較用インプットデータ
+df_input_for_diff = df_input[1:]
+df_input_for_diff
+
+level_input, slope_input, curvature_input = calc_input_factor_values(lmd, tenor_list)
+
+test_rate = {}
+for idx, row in df_testpred_w_lsc_shift.iterrows():
+    test_rate[idx] = np.ravel(row["test_w_l"] * level_input + row["test_w_s"] * slope_input + row["test_w_c"] * curvature_input)
+
+df_test_result_rate =pd.DataFrame.from_dict(test_rate, orient="index", columns=tenor_list)
+df_test_result_rate
+
+for col in df_test_result_rate.columns:
+    df_test_result_rate["diff_" + str(col)] = df_test_result_rate[col] - df_input_for_diff[col]
+df_test_result_rate
+
+# lagnum = 1  # AR(1)なので１
+# diff_2_sum_L = np.sum(df_test_w_lsc["diff_l"].values ** 2)
+# sigma_L_2 = (1/(len(df_test_w_lsc) - 2 - lagnum)) * diff_2_sum_L
+# sigma_L = np.sqrt(sigma_L_2)
+
+# %%
+griddiff_squared_sum = (df_test_result_rate.filter(like="diff_", axis=1) ** 2).sum()
+grid_sigma_squared = (1/(len(df_test_result_rate) -2)) * griddiff_squared_sum
+grid_sigma = np.sqrt(grid_sigma_squared)
+
+grid_sigma_dic = {}
+for t, s in zip(tenor_list, grid_sigma.values):
+    grid_sigma_dic[int(t)] = s
+
+pd.DataFrame.from_dict(grid_sigma_dic, orient='index', columns=['grid_sigma'])
+
+
